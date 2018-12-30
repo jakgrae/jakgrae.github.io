@@ -1,0 +1,219 @@
+---
+title: "Machine Learning Coursera"
+author: "Jakob Graessel"
+date: "28 Dezember 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Coursera Machine Learning - Course Project
+
+Analysis of Fitness Data to predict outcome *classe* (way in which training session was performed) by using Machine Learning algorithms and other variables provided in the data set.
+
+## 1. Data Cleaning
+
+First load **caret** and **ggplot2** packages:
+
+
+```{r eval=F}
+library(caret)
+library(ggplot2)
+```
+
+Then read training data and look at data structure (only first 20 columns to limit output):
+```{r}
+pml_complete <- read.csv("pml-training.csv")
+str(pml_complete[,1:20])
+```
+
+Turning levels/values of some variables (*kurtosis_yaw_dumbbell*, *skewness_roll_dumbbell* etc.) into meaningful NA's, and exclude variables with more than 95% NA's, as splitting data afterwards into train and test set can lead to varibles with only missing values. Furthermore imputation is also not an option because there are too few complete cases in the data, which can be used for a nearest neighbour imputation approach.
+```{r}
+pml_cleaned <- pml_complete
+pml_cleaned[pml_cleaned==""] <- NA
+pml_cleaned[pml_cleaned=="#DIV/0!"] <- NA
+
+## turn factor variables into character/numeric
+pml_cleaned[, sapply(pml_cleaned, is.factor)]<- sapply(pml_cleaned[,sapply(pml_cleaned, is.factor)], 
+                                                       function(x) levels(x)[x])
+
+## number of variables with more than 95% missing values:
+sum(sapply(pml_cleaned, function(x) sum(is.na(x))/length(x) > 0.95))
+
+## exclude variables from data
+pml_reduced <- pml_cleaned[,sapply(pml_cleaned, function(x) sum(is.na(x))/length(x) < 0.95)]
+```
+
+## 2. Data Splitting
+
+Split data into train (60%), test (20%) and validation sets (20%) and set seed for reproducability.
+```{r}
+set.seed(270514)
+inTrain <- caret::createDataPartition(y=pml_reduced$classe,
+                               p=.6, list=F)
+training <- pml_reduced[inTrain,]
+validate_testing <- pml_reduced[-inTrain, ]
+
+inValidation <- caret::createDataPartition(y=validate_testing$classe,
+                                    p=.5, list=F)
+testing <- validate_testing[-inValidation,]
+validation <- validate_testing[inValidation,]
+```
+
+## 3. Analyse Trainig Data
+
+First look at index variable if there's a relationship between *index* and *classe* variable:
+```{r }
+ggplot2::qplot(X, classe, data=training)
+
+```
+
+Exclude *index* variable and for safety reason also *user_name* from training data. Furthermore look if outcome is dependent from time variables (*raw_timestamp_part_1*, *cvtd_timestamp*, *new_window*, etc):
+
+```{r echo=F}
+library(ggplot2)
+ggplot(aes(x=as.factor(raw_timestamp_part_1), y=classe),  data=training) +
+  geom_point() +
+  scale_x_discrete(breaks=training$raw_timestamp_part_1[seq(1, nrow(training), by=nrow(training)/10)])+
+  labs(x="raw_timestamp_part_1", title="classe vs. raw_timestamp_part_1")
+
+```
+
+Time variables also influence outcome, therefore they should also be excluded from model building.
+```{r}
+training <- training[, !colnames(training) %in% c("X", "user_name", "raw_timestamp_part_1", 
+                                                  "raw_timestamp_part_2", "cvtd_timestamp", 
+                                                  "new_window", "num_window")]
+```
+
+## 4. Model Building
+
+Build three different models: Classification Tree (**rpart**), Random Forest (**rf**) and Generalized Boosted Models (**gbm**). Use all other variables as predictors and use default options:
+
+```{r eval=FALSE}
+rpart_obj <- train(classe~., method="rpart", data =training)
+
+rf_obj <- train(classe~., method="rf",data = training)
+
+gbm_obj <- train(classe~., method="gbm", data=training)
+```
+
+Further analysis of all three models: first look at Classification Tree -what are the features used as splitting criterias:
+
+```{r}
+plot(rpart_obj$finalModel)
+text(rpart_obj$finalModel)
+```
+
+Look at Random Forest Model - which features are the most important ones (TOP 5):
+```{r}
+imp <- rf_obj$finalModel$importance
+imp[order(imp, decreasing = T), ][1:5]
+```
+
+Results of Generalised Boosted Model:
+```{r}
+gbm_obj$results
+```
+
+## 5. Model Performance on test data
+
+Next use test set and predict outcomes by using the three different models and compare them with the real values:
+```{r}
+
+## get prediction on test data 
+prediction_rf <- predict(rf_obj, testing)
+prediction_rpart <- predict(rpart_obj, testing)
+prediction_gbm <- predict(gbm_obj, testing)
+
+# look at table of prediction vs true
+table(prediction_rf, testing$classe)
+table(prediction_rpart, testing$classe)
+table(prediction_gbm, testing$classe)
+```
+Classification tree seem to have the worst predictions in all classes, whereas random forest and gbm have very good predictions. What are the accuracy rates for all three models?
+
+```{r}
+
+## calculate accuracy on test data:
+library(caret)
+# Random Forest:
+cfm_rf <- confusionMatrix(table(prediction_rf, testing$classe))
+cfm_rf$overall["Accuracy"]
+# Classification Tree:
+cfm_rpart <- confusionMatrix(table(prediction_rpart, testing$classe))
+cfm_rpart$overal["Accuracy"]
+# Generalised Boosted Model
+cfm_gbm<- confusionMatrix(table(prediction_gbm, testing$classe))
+cfm_gbm$overal["Accuracy"]
+```
+
+Random Forest has the best accuracy on test set. To visualise performance of all three models use scatterplot of the two most important predictors for Random Forest model (*yaw_belt* & *roll_belt*). The different shapes of the data points indicate the true *classe* value in the test set, whereas the color is used to see wether the outcome was predicted right by the model (green=right prediction, red=false prediction):
+```{r}
+
+testing$classe_prediction_rf <- prediction_rf
+testing$classe_pred_rf_acc <- (testing$classe == testing$classe_prediction_rf) *1
+
+testing$classe_prediction_rpart <- prediction_rpart
+testing$classe_pred_rpart_acc <- (testing$classe == testing$classe_prediction_rpart) *1
+
+testing$classe_prediction_gbm <- prediction_gbm
+testing$classe_pred_gbm_acc <- (testing$classe == testing$classe_prediction_gbm) *1
+
+```
+
+```{r, echo=FALSE}
+testing[, c("classe_pred_gbm_acc", "classe_pred_rpart_acc", "classe_pred_rf_acc")] <- sapply(testing[, c("classe_pred_gbm_acc", "classe_pred_rpart_acc", "classe_pred_rf_acc")], as.factor)
+
+rf_plot <- ggplot(aes(x=roll_belt, y=yaw_belt), data=testing)+
+  geom_point(aes(color=classe_pred_rf_acc, shape=classe)) +
+  scale_color_manual(values = c("red", "green3"))+
+  labs(title="RF Predictions of classe",
+       color="Accuracy",
+       shape = "true classe")+
+  theme(plot.title = element_text(hjust=0.5),
+        legend.position = "None")
+
+rpart_plot<- ggplot(aes(x=roll_belt, y=yaw_belt), data=testing)+
+  geom_point(aes(color=classe_pred_rpart_acc, shape=classe))+
+  scale_color_manual(values = c("red", "green3"))+
+  labs(title="CART Predictions of classe",
+       color="Accuracy",
+       shape = "true classe")+
+  theme(plot.title = element_text(hjust=0.5))
+
+gbm_plot<- ggplot(aes(x=roll_belt, y=yaw_belt), data=testing)+
+  geom_point(aes(color=classe_pred_gbm_acc, shape=classe)) +
+  scale_color_manual(values = c("red", "green3")) +
+  labs(title="GBM Predictions of classe",
+       color="Accuracy",
+       shape = "true classe")+
+  theme(plot.title = element_text(hjust=0.5),
+        legend.position = "None")
+
+gridExtra::grid.arrange(rf_plot, gbm_plot, rpart_plot, nrow=2)
+```
+
+## 6. Validate Random Forest Model
+
+Finally use Random Forest Model for Validation Set, to see if results are stable:
+
+```{r}
+validation_rf <- predict(rf_obj, validation)
+table(validation_rf, validation$classe)
+
+cfm_rf_validate <- caret::confusionMatrix(table(validation_rf, validation$classe))
+cfm_rf_validate$overall["Accuracy"]
+```
+
+## 7. Quiz Prediction
+
+Model has stable predictions also for validation set, use Random Forest for prediction of final test data:
+
+```{r}
+quiz_data <- read.csv("pml-testing.csv")
+predict(rf_obj, quiz_data)
+
+```
